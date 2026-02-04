@@ -1,0 +1,21 @@
+name: Canaan Shift Start (22:00 UZT)
+
+on:
+  schedule:
+    # 22:00 UZT = 17:00 UTC, Mon-Fri
+    - cron: "0 17 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send shift start message (22:00 UZT)
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "chat_id": "${{ secrets.TELEGRAM_CHAT_ID }}",
+              "text": "Canaan — Shift Start (22:00 UZT)\n\n@M1lak00\n@shukurov_live\nMaria\n\nWelcome to your shift 👋\nBefore getting started, please make sure to:\n\n- Log in to the AUX Dashboard\n- Set your status to Online in Zendesk\n- Set your status to Available in AVOXI\n\nIf you’ve already completed these steps, you can safely ignore this message.\n\nThank you for your dedication and teamwork — wishing you a smooth and successful shift 🌟",
+              "disable_web_page_preview": true
+            }'
