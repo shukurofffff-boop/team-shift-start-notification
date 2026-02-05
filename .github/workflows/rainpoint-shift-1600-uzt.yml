@@ -16,6 +16,6 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{
               "chat_id": "${{ secrets.TELEGRAM_CHAT_ID }}",
-              "text": "Canaan — Shift Start (16:00 UZT)\n\n@Seravarara\n@AsadbekAbduraimov\n@TommyAndersonn\n\nWelcome to your shift 👋\nBefore getting started, please make sure to:\n\n- Log in to the AUX Dashboard\n- Set your status to Online in Zendesk\n- Set your status to Available in AVOXI\n\nIf you’ve already completed these steps, you can safely ignore this message.\n\nThank you for your support and teamwork — wishing you a smooth and productive shift 🌟",
+              "text": "Canaan — Shift Start (16:00 UZT)\n\n@Seravarara\n@AsadbekAbduraimov\n@TommyAndersonn\n\nWelcome to your shift 👋\nBefore getting started, please make sure to:\n\n- Login to the AUX Dashboard\n- Set your status to Online in Zendesk\n- Set your status to Available in AVOXI\n\nIf you’ve already completed these steps, you can safely ignore this message.\n\nThank you for your support and teamwork — wishing you a smooth and productive shift 🌟",
               "disable_web_page_preview": true
             }'
