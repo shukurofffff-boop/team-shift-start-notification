@@ -10,7 +10,7 @@ jobs:
   check-status:
     runs-on: ubuntu-latest
     steps:
-          - name: Check Zendesk agent status
+      - name: Check Zendesk agent status
         run: |
           set -e
 
