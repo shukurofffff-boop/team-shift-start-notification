@@ -1,0 +1,15 @@
+name: Canaan Status Check (16:05 UZT)
+
+on:
+  schedule:
+    # 16:05 UZT = 11:05 UTC, Mon–Fri
+    - cron: "5 11 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  check-status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Status check placeholder
+        run: |
+          echo "Status check workflow triggered"
