@@ -21,13 +21,12 @@ jobs:
       ZENDESK_API_TOKEN: ${{ secrets.ZENDESK_API_TOKEN }}
       ZENDESK_SUBDOMAIN: "rainpointonline"
 
-      # AVOXI
+      # AVOXI (your correct API server from screenshot)
       AVOXI_API_TOKEN: ${{ secrets.AVOXI_API_TOKEN }}
-      # If your AVOXI base URL differs, change it here (no other edits needed)
-      AVOXI_BASE_URL: "https://api.avoxi.io"
+      AVOXI_BASE_URL: "https://genius.avoxi.com/api/v2"
 
-      # Heuristic window for “Zendesk online” (minutes since last_login_at)
-      ZENDESK_ONLINE_WINDOW_MINUTES: "60"
+      # Zendesk “online” heuristic window in minutes (adjust if needed)
+      ZENDESK_ONLINE_WINDOW_MINUTES: "180"
 
     steps:
       - name: Install jq
@@ -63,7 +62,6 @@ jobs:
           # Helpers
           # ----------------------------
           url_encode() {
-            # minimal URL encoder for query strings
             python3 - <<'PY' "$1"
           import sys, urllib.parse
           print(urllib.parse.quote(sys.argv[1], safe=""))
@@ -97,9 +95,7 @@ jobs:
 
           # ----------------------------
           # Zendesk: “online” heuristic via last_login_at
-          # - Finds user by email
-          # - Reads last_login_at
-          # - READY if last_login_at within ZENDESK_ONLINE_WINDOW_MINUTES
+          # READY if last_login_at within ZENDESK_ONLINE_WINDOW_MINUTES
           # ----------------------------
           check_zendesk_ready() {
             local email="$1"
@@ -152,7 +148,6 @@ jobs:
               return 0
             fi
 
-            # Compare times (UTC). last_login_at is ISO8601.
             local now_epoch login_epoch diff_min window_min
             now_epoch="$(date -u +%s)"
             login_epoch="$(date -u -d "${last_login}" +%s 2>/dev/null || echo 0)"
@@ -173,28 +168,21 @@ jobs:
           }
 
           # ----------------------------
-          # AVOXI: availability check (defensive)
-          # Tries a few common endpoints and looks for common fields.
-          # READY if it finds a status/availability that matches:
-          #   ready | available | online | idle
-          # Otherwise NOT_READY (including any API error / unknown payload)
+          # AVOXI: availability check (Genius cluster)
+          # READY if status contains “available” or “ready” (case-insensitive)
           # ----------------------------
           check_avoxi_ready() {
             local agent_id="$1"
             local token="${AVOXI_API_TOKEN}"
             local base="${AVOXI_BASE_URL}"
 
-            # Try multiple possible endpoints (first 200 wins)
+            # Try a few likely endpoints under /api/v2
             local endpoints=(
-              "${base}/v1/agents/${agent_id}"
-              "${base}/v1/agents/${agent_id}/status"
-              "${base}/v1/agents/${agent_id}/availability"
-              "${base}/v2/agents/${agent_id}"
-              "${base}/v2/agents/${agent_id}/status"
-              "${base}/api/v1/agents/${agent_id}"
-              "${base}/api/v1/agents/${agent_id}/status"
-              "${base}/api/v2/agents/${agent_id}"
-              "${base}/api/v2/agents/${agent_id}/status"
+              "${base}/agents/${agent_id}"
+              "${base}/agents/${agent_id}/status"
+              "${base}/agents/${agent_id}/availability"
+              "${base}/users/${agent_id}"
+              "${base}/users/${agent_id}/status"
             )
 
             local code file payload found="false"
@@ -218,8 +206,7 @@ jobs:
               return 0
             fi
 
-            # Normalize possible fields into one string
-            # (handles payloads like {status:"available"} or {data:{availability:"ready"}} etc.)
+            # Extract the most likely status/availability field from different payload shapes
             local status
             status="$(jq -r '
               [
@@ -242,11 +229,10 @@ jobs:
               return 0
             fi
 
-            # Lowercase compare
             local s
             s="$(tr '[:upper:]' '[:lower:]' <<<"$status")"
 
-            if [[ "$s" =~ ^(ready|available|online|idle)$ ]]; then
+            if [[ "$s" == *"available"* || "$s" == *"ready"* ]]; then
               echo "READY|${status}"
             else
               echo "NOT_READY|${status}"
@@ -254,14 +240,9 @@ jobs:
           }
 
           # ----------------------------
-          # Main loop: 1 message per agent, only if needed
+          # Main loop: one message per agent, only if needed
           # ----------------------------
           total_agents="$(jq 'length' <<<"$AGENTS_JSON")"
-          if [[ "$total_agents" -le 0 ]]; then
-            echo "No agents configured. Exiting."
-            exit 0
-          fi
-
           for i in $(seq 0 $((total_agents - 1))); do
             name="$(jq -r ".[$i].name" <<<"$AGENTS_JSON")"
             zendesk_email="$(jq -r ".[$i].zendesk_email" <<<"$AGENTS_JSON")"
@@ -279,7 +260,6 @@ jobs:
             echo "Agent: ${name} | Zendesk: ${z_state} (${z_note}) | AVOXI: ${a_state} (${a_note})"
 
             if [[ "$z_state" != "READY" || "$a_state" != "READY" ]]; then
-              # One message per agent, only if needed (no spam)
               msg="⚠️ 16:05 UZT readiness check\n${tg}\nPlease set your status to Ready.\nZendesk: ${z_state}\nAVOXI: ${a_state}"
               telegram_send "$msg"
             fi
