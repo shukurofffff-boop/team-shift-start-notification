@@ -1,0 +1,13 @@
+name: Canaan Status Check 16:05 (v2)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "5 11 * * 1-5"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hello
+        run: echo "Workflow parsed successfully"
