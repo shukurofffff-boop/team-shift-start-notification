@@ -9,5 +9,27 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Hello
-        run: echo "Workflow parsed successfully"
+            - name: Check Zendesk agent status
+        run: |
+          set -e
+
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+          ZENDESK_BASE="https://rainpointonline.zendesk.com"
+          AUTH="${{ secrets.ZENDESK_EMAIL }}/token:${{ secrets.ZENDESK_API_TOKEN }}"
+
+          check_zendesk () {
+            NAME="$1"
+            EMAIL="$2"
+
+            RESPONSE=$(curl -s -u "$AUTH" \
+              "$ZENDESK_BASE/api/v2/users/search.json?query=$EMAIL")
+
+            ONLINE=$(echo "$RESPONSE" | jq -r '.users[0].online')
+
+            echo "$NAME Zendesk online status: $ONLINE"
+          }
+
+          check_zendesk "Tommy" "tommymarshmallow0@gmail.com"
+          check_zendesk "Mark" "asadbekbiznessman@gmail.com"
