@@ -24,7 +24,7 @@ jobs:
       # AVOXI
       AVOXI_API_TOKEN: ${{ secrets.AVOXI_API_TOKEN }}
       # If your AVOXI base URL differs, change it here (no other edits needed)
-      AVOXI_BASE_URL: "https://api.avoxi.com"
+      AVOXI_BASE_URL: "https://api.avoxi.io"
 
       # Heuristic window for “Zendesk online” (minutes since last_login_at)
       ZENDESK_ONLINE_WINDOW_MINUTES: "60"
