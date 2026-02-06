@@ -1,36 +1,288 @@
-name: Canaan Status Check 16:05 (v2)
+name: Canaan Status Check 16:05 UZT (v2)
 
 on:
-  workflow_dispatch:
   schedule:
+    # 16:05 UZT (UTC+5) = 11:05 UTC, Mon–Fri
     - cron: "5 11 * * 1-5"
+  workflow_dispatch: {}
 
 jobs:
-  check:
+  status-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # Telegram
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      # Zendesk
+      ZENDESK_EMAIL: ${{ secrets.ZENDESK_EMAIL }}
+      ZENDESK_API_TOKEN: ${{ secrets.ZENDESK_API_TOKEN }}
+      ZENDESK_SUBDOMAIN: "rainpointonline"
+
+      # AVOXI
+      AVOXI_API_TOKEN: ${{ secrets.AVOXI_API_TOKEN }}
+      # If your AVOXI base URL differs, change it here (no other edits needed)
+      AVOXI_BASE_URL: "https://api.avoxi.com"
+
+      # Heuristic window for “Zendesk online” (minutes since last_login_at)
+      ZENDESK_ONLINE_WINDOW_MINUTES: "60"
+
     steps:
-      - name: Check Zendesk agent status
-        shell: bash
+      - name: Install jq
         run: |
           set -e
-
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y jq
 
-          ZENDESK_BASE="https://rainpointonline.zendesk.com"
-          AUTH="${{ secrets.ZENDESK_EMAIL }}/token:${{ secrets.ZENDESK_API_TOKEN }}"
+      - name: Check Zendesk + AVOXI and notify via Telegram if needed
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          check_zendesk () {
-            NAME="$1"
-            EMAIL="$2"
+          # ----------------------------
+          # Agents for the 16:00 shift
+          # ----------------------------
+          AGENTS_JSON='[
+            {
+              "name": "Tommy",
+              "zendesk_email": "tommymarshmallow0@gmail.com",
+              "avoxi_id": 112,
+              "telegram": "@TommyAndersonn"
+            },
+            {
+              "name": "Mark",
+              "zendesk_email": "asadbekbiznessman@gmail.com",
+              "avoxi_id": 111,
+              "telegram": "@AsadbekAbduraimov"
+            }
+          ]'
 
-            RESPONSE=$(curl -s -u "$AUTH" \
-              "$ZENDESK_BASE/api/v2/users/search.json?query=$EMAIL")
-
-            ONLINE=$(echo "$RESPONSE" | jq -r '.users[0].online')
-
-            echo "$NAME Zendesk online status: $ONLINE"
+          # ----------------------------
+          # Helpers
+          # ----------------------------
+          url_encode() {
+            # minimal URL encoder for query strings
+            python3 - <<'PY' "$1"
+          import sys, urllib.parse
+          print(urllib.parse.quote(sys.argv[1], safe=""))
+          PY
           }
 
-          check_zendesk "Tommy" "tommymarshmallow0@gmail.com"
-          check_zendesk "Mark" "asadbekbiznessman@gmail.com"
+          telegram_send() {
+            local text="$1"
+            curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d "chat_id=${TELEGRAM_CHAT_ID}" \
+              -d "text=${text}" \
+              -d "disable_web_page_preview=true" >/dev/null
+          }
+
+          zendesk_auth_header() {
+            # Zendesk API: basic auth with "email/token" + api_token
+            local user="${ZENDESK_EMAIL}/token"
+            local pass="${ZENDESK_API_TOKEN}"
+            printf '%s' "${user}:${pass}" | base64 -w 0
+          }
+
+          http_get_json() {
+            # Usage: http_get_json "url" "headerName: headerValue" ...
+            local url="$1"; shift
+            local tmp
+            tmp="$(mktemp)"
+            local code
+            code="$(curl -sS -o "$tmp" -w "%{http_code}" "$url" "$@")" || true
+            echo "$code|$tmp"
+          }
+
+          # ----------------------------
+          # Zendesk: “online” heuristic via last_login_at
+          # - Finds user by email
+          # - Reads last_login_at
+          # - READY if last_login_at within ZENDESK_ONLINE_WINDOW_MINUTES
+          # ----------------------------
+          check_zendesk_ready() {
+            local email="$1"
+            local q
+            q="$(url_encode "type:user email:${email}")"
+
+            local base="https://${ZENDESK_SUBDOMAIN}.zendesk.com/api/v2"
+            local auth_b64
+            auth_b64="$(zendesk_auth_header)"
+
+            # 1) Find user id
+            local res1 code1 file1
+            res1="$(http_get_json "${base}/users/search.json?query=${q}" -H "Authorization: Basic ${auth_b64}")"
+            code1="${res1%%|*}"
+            file1="${res1#*|}"
+
+            if [[ "$code1" != "200" ]]; then
+              rm -f "$file1"
+              echo "NOT_READY|Zendesk API error (${code1})"
+              return 0
+            fi
+
+            local user_id
+            user_id="$(jq -r '.users[0].id // empty' "$file1")"
+            rm -f "$file1"
+
+            if [[ -z "${user_id}" ]]; then
+              echo "NOT_READY|Zendesk user not found"
+              return 0
+            fi
+
+            # 2) Read last_login_at
+            local res2 code2 file2
+            res2="$(http_get_json "${base}/users/${user_id}.json" -H "Authorization: Basic ${auth_b64}")"
+            code2="${res2%%|*}"
+            file2="${res2#*|}"
+
+            if [[ "$code2" != "200" ]]; then
+              rm -f "$file2"
+              echo "NOT_READY|Zendesk user fetch error (${code2})"
+              return 0
+            fi
+
+            local last_login
+            last_login="$(jq -r '.user.last_login_at // empty' "$file2")"
+            rm -f "$file2"
+
+            if [[ -z "${last_login}" || "${last_login}" == "null" ]]; then
+              echo "NOT_READY|No last_login_at"
+              return 0
+            fi
+
+            # Compare times (UTC). last_login_at is ISO8601.
+            local now_epoch login_epoch diff_min window_min
+            now_epoch="$(date -u +%s)"
+            login_epoch="$(date -u -d "${last_login}" +%s 2>/dev/null || echo 0)"
+
+            if [[ "$login_epoch" -le 0 ]]; then
+              echo "NOT_READY|Invalid last_login_at"
+              return 0
+            fi
+
+            diff_min=$(( (now_epoch - login_epoch) / 60 ))
+            window_min="${ZENDESK_ONLINE_WINDOW_MINUTES}"
+
+            if [[ "$diff_min" -le "$window_min" ]]; then
+              echo "READY|Last login ${diff_min}m ago"
+            else
+              echo "NOT_READY|Last login ${diff_min}m ago"
+            fi
+          }
+
+          # ----------------------------
+          # AVOXI: availability check (defensive)
+          # Tries a few common endpoints and looks for common fields.
+          # READY if it finds a status/availability that matches:
+          #   ready | available | online | idle
+          # Otherwise NOT_READY (including any API error / unknown payload)
+          # ----------------------------
+          check_avoxi_ready() {
+            local agent_id="$1"
+            local token="${AVOXI_API_TOKEN}"
+            local base="${AVOXI_BASE_URL}"
+
+            # Try multiple possible endpoints (first 200 wins)
+            local endpoints=(
+              "${base}/v1/agents/${agent_id}"
+              "${base}/v1/agents/${agent_id}/status"
+              "${base}/v1/agents/${agent_id}/availability"
+              "${base}/v2/agents/${agent_id}"
+              "${base}/v2/agents/${agent_id}/status"
+              "${base}/api/v1/agents/${agent_id}"
+              "${base}/api/v1/agents/${agent_id}/status"
+              "${base}/api/v2/agents/${agent_id}"
+              "${base}/api/v2/agents/${agent_id}/status"
+            )
+
+            local code file payload found="false"
+            for ep in "${endpoints[@]}"; do
+              local res
+              res="$(http_get_json "$ep" -H "Authorization: Bearer ${token}" -H "Accept: application/json")"
+              code="${res%%|*}"
+              file="${res#*|}"
+
+              if [[ "$code" == "200" ]]; then
+                payload="$(cat "$file")"
+                rm -f "$file"
+                found="true"
+                break
+              fi
+              rm -f "$file"
+            done
+
+            if [[ "$found" != "true" ]]; then
+              echo "NOT_READY|AVOXI API error (no 200 response)"
+              return 0
+            fi
+
+            # Normalize possible fields into one string
+            # (handles payloads like {status:"available"} or {data:{availability:"ready"}} etc.)
+            local status
+            status="$(jq -r '
+              [
+                .status,
+                .availability,
+                .state,
+                .agent_status,
+                .presence,
+                .data.status,
+                .data.availability,
+                .data.state,
+                .data.agent_status,
+                .data.presence
+              ]
+              | map(select(. != null and . != "")) | .[0] // ""
+            ' <<<"$payload" 2>/dev/null || echo "")"
+
+            if [[ -z "$status" ]]; then
+              echo "NOT_READY|Unknown AVOXI payload"
+              return 0
+            fi
+
+            # Lowercase compare
+            local s
+            s="$(tr '[:upper:]' '[:lower:]' <<<"$status")"
+
+            if [[ "$s" =~ ^(ready|available|online|idle)$ ]]; then
+              echo "READY|${status}"
+            else
+              echo "NOT_READY|${status}"
+            fi
+          }
+
+          # ----------------------------
+          # Main loop: 1 message per agent, only if needed
+          # ----------------------------
+          total_agents="$(jq 'length' <<<"$AGENTS_JSON")"
+          if [[ "$total_agents" -le 0 ]]; then
+            echo "No agents configured. Exiting."
+            exit 0
+          fi
+
+          for i in $(seq 0 $((total_agents - 1))); do
+            name="$(jq -r ".[$i].name" <<<"$AGENTS_JSON")"
+            zendesk_email="$(jq -r ".[$i].zendesk_email" <<<"$AGENTS_JSON")"
+            avoxi_id="$(jq -r ".[$i].avoxi_id" <<<"$AGENTS_JSON")"
+            tg="$(jq -r ".[$i].telegram" <<<"$AGENTS_JSON")"
+
+            z_out="$(check_zendesk_ready "$zendesk_email")"
+            a_out="$(check_avoxi_ready "$avoxi_id")"
+
+            z_state="${z_out%%|*}"
+            z_note="${z_out#*|}"
+            a_state="${a_out%%|*}"
+            a_note="${a_out#*|}"
+
+            echo "Agent: ${name} | Zendesk: ${z_state} (${z_note}) | AVOXI: ${a_state} (${a_note})"
+
+            if [[ "$z_state" != "READY" || "$a_state" != "READY" ]]; then
+              # One message per agent, only if needed (no spam)
+              msg="⚠️ 16:05 UZT readiness check\n${tg}\nPlease set your status to Ready.\nZendesk: ${z_state}\nAVOXI: ${a_state}"
+              telegram_send "$msg"
+            fi
+          done
+
+          echo "Done."
