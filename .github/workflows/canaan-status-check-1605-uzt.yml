@@ -10,6 +10,23 @@ jobs:
   check-status:
     runs-on: ubuntu-latest
     steps:
-      - name: Status check placeholder
+          - name: Check Zendesk agent status
         run: |
-          echo "Status check workflow triggered"
+          set -e
+
+          ZENDESK_BASE="https://rainpointonline.zendesk.com"
+          AUTH="${{ secrets.ZENDESK_EMAIL }}/token:${{ secrets.ZENDESK_API_TOKEN }}"
+
+          check_zendesk () {
+            AGENT_NAME="$1"
+            AGENT_EMAIL="$2"
+
+            ONLINE_STATUS=$(curl -s -u "$AUTH" \
+              "$ZENDESK_BASE/api/v2/users/search.json?query=$AGENT_EMAIL" \
+              | jq -r '.users[0].online')
+
+            echo "$AGENT_NAME Zendesk online status: $ONLINE_STATUS"
+          }
+
+          check_zendesk "Tommy" "tommymarshmallow0@gmail.com"
+          check_zendesk "Mark" "asadbekbiznessman@gmail.com"
