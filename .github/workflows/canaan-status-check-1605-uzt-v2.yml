@@ -2,7 +2,7 @@ name: Canaan Status Check 16:05 UZT (v2)
 
 on:
   schedule:
-    # 16:05 UZT (UTC+5) = 11:05 UTC, Mon–Fri
+    # Intended: 16:05 UZT (UTC+5) = 11:05 UTC, Mon–Fri
     - cron: "5 11 * * 1-5"
   workflow_dispatch: {}
 
@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 10
 
     env:
-      # Telegram
+      # Telegram (already working)
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
@@ -21,11 +21,11 @@ jobs:
       ZENDESK_API_TOKEN: ${{ secrets.ZENDESK_API_TOKEN }}
       ZENDESK_SUBDOMAIN: "rainpointonline"
 
-      # AVOXI (Genius cluster)
+      # AVOXI (from your screenshot)
       AVOXI_API_TOKEN: ${{ secrets.AVOXI_API_TOKEN }}
       AVOXI_BASE_URL: "https://genius.avoxi.com/api/v2"
 
-      # Zendesk “online” heuristic window in minutes
+      # Consider Zendesk "online" if last_login_at within this many minutes
       ZENDESK_ONLINE_WINDOW_MINUTES: "180"
 
     steps:
@@ -44,34 +44,40 @@ jobs:
           echo "UTC time now: $(date -u)"
           echo "Runner local time: $(date)"
 
+          # ----------------------------
+          # Agents for the 16:00 shift
+          # NOTE: avoxi_ext is the EXTENSION you see in AVOXI UI (111/112)
+          # This workflow will resolve the REAL AVOXI agent id automatically.
+          # ----------------------------
           AGENTS_JSON='[
             {
               "name": "Tommy",
               "zendesk_email": "tommymarshmallow0@gmail.com",
-              "avoxi_id": 112,
+              "avoxi_ext": "112",
               "telegram": "@TommyAndersonn"
             },
             {
               "name": "Mark",
               "zendesk_email": "asadbekbiznessman@gmail.com",
-              "avoxi_id": 111,
+              "avoxi_ext": "111",
               "telegram": "@AsadbekAbduraimov"
             }
           ]'
 
+          # ----------------------------
+          # Helpers
+          # ----------------------------
           url_encode() {
-            python3 - <<'PY' "$1"
-          import sys, urllib.parse
-          print(urllib.parse.quote(sys.argv[1], safe=""))
-          PY
+            # Use jq URI encoder (stable on GitHub runners)
+            jq -rn --arg v "$1" '$v|@uri'
           }
 
           telegram_send() {
             local text="$1"
             curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              -d "chat_id=${TELEGRAM_CHAT_ID}" \
-              -d "text=${text}" \
-              -d "disable_web_page_preview=true" >/dev/null
+              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text=${text}" \
+              --data-urlencode "disable_web_page_preview=true" >/dev/null
           }
 
           zendesk_auth_header() {
@@ -81,6 +87,7 @@ jobs:
           }
 
           http_get_json() {
+            # Prints: HTTP_CODE|TMPFILE
             local url="$1"; shift
             local tmp
             tmp="$(mktemp)"
@@ -89,6 +96,9 @@ jobs:
             echo "$code|$tmp"
           }
 
+          # ----------------------------
+          # Zendesk readiness (safe heuristic)
+          # ----------------------------
           check_zendesk_ready() {
             local email="$1"
             local q
@@ -157,10 +167,138 @@ jobs:
             fi
           }
 
-          check_avoxi_ready() {
-            local agent_id="$1"
-            local token="${AVOXI_API_TOKEN}"
+          # ----------------------------
+          # AVOXI: Resolve REAL agent id (not the extension)
+          # Tries several list endpoints, then matches by extension/email/name.
+          # Returns: ID|MATCH_REASON
+          # ----------------------------
+          avoxi_resolve_agent_id() {
+            local ext="$1"
+            local email="$2"
+            local name="$3"
             local base="${AVOXI_BASE_URL}"
+            local token="${AVOXI_API_TOKEN}"
+
+            # Candidate list endpoints (one of these will usually work)
+            local endpoints=(
+              "${base}/agents"
+              "${base}/users"
+              "${base}/agents?per_page=200"
+              "${base}/users?per_page=200"
+              "${base}/agents?limit=200"
+              "${base}/users?limit=200"
+            )
+
+            local payload=""
+            local ok="false"
+            local code file
+
+            for ep in "${endpoints[@]}"; do
+              local res
+              res="$(http_get_json "$ep" -H "Authorization: Bearer ${token}" -H "Accept: application/json")"
+              code="${res%%|*}"
+              file="${res#*|}"
+
+              if [[ "$code" == "200" ]]; then
+                payload="$(cat "$file")"
+                rm -f "$file"
+                ok="true"
+                break
+              fi
+              rm -f "$file"
+            done
+
+            if [[ "$ok" != "true" ]]; then
+              echo "|LIST_API_ERROR"
+              return 0
+            fi
+
+            # Normalize into an array:
+            # payload may be [..] or {data:[..]} or {agents:[..]} etc.
+            local arr
+            arr="$(jq -c '
+              if type=="array" then .
+              elif .data and (.data|type)=="array" then .data
+              elif .agents and (.agents|type)=="array" then .agents
+              elif .users and (.users|type)=="array" then .users
+              else [] end
+            ' <<<"$payload" 2>/dev/null || echo '[]')"
+
+            # 1) Match by extension (most reliable)
+            local id_by_ext
+            id_by_ext="$(jq -r --arg ext "$ext" '
+              .[]
+              | select(
+                  (.extension? == $ext)
+                  or (.ext? == $ext)
+                  or (.sip_extension? == $ext)
+                  or (.phone_extension? == $ext)
+                )
+              | .id // empty
+              | tostring
+              ' <<<"$arr" | head -n 1)"
+
+            if [[ -n "$id_by_ext" ]]; then
+              echo "${id_by_ext}|MATCH_EXTENSION"
+              return 0
+            fi
+
+            # 2) Match by email (if present in AVOXI payload)
+            local id_by_email=""
+            if [[ -n "$email" ]]; then
+              id_by_email="$(jq -r --arg email "$email" '
+                .[]
+                | select((.email? // "" | ascii_downcase) == ($email | ascii_downcase))
+                | .id // empty
+                | tostring
+              ' <<<"$arr" | head -n 1)"
+            fi
+
+            if [[ -n "$id_by_email" ]]; then
+              echo "${id_by_email}|MATCH_EMAIL"
+              return 0
+            fi
+
+            # 3) Match by name (last resort)
+            local id_by_name=""
+            if [[ -n "$name" ]]; then
+              id_by_name="$(jq -r --arg name "$name" '
+                .[]
+                | select((.name? // "" | ascii_downcase) == ($name | ascii_downcase))
+                | .id // empty
+                | tostring
+              ' <<<"$arr" | head -n 1)"
+            fi
+
+            if [[ -n "$id_by_name" ]]; then
+              echo "${id_by_name}|MATCH_NAME"
+              return 0
+            fi
+
+            echo "|NOT_FOUND"
+          }
+
+          # ----------------------------
+          # AVOXI presence check
+          # Uses resolved agent id, then calls /agents/{id}/presence
+          # READY if presence contains "available" or "ready"
+          # ----------------------------
+          check_avoxi_ready() {
+            local ext="$1"
+            local email="$2"
+            local name="$3"
+            local base="${AVOXI_BASE_URL}"
+            local token="${AVOXI_API_TOKEN}"
+
+            local resolved
+            resolved="$(avoxi_resolve_agent_id "$ext" "$email" "$name")"
+            local agent_id="${resolved%%|*}"
+            local reason="${resolved#*|}"
+
+            if [[ -z "$agent_id" ]]; then
+              echo "NOT_READY|AVOXI id resolve failed (${reason})"
+              return 0
+            fi
 
             local res code file
             res="$(http_get_json "${base}/agents/${agent_id}/presence" \
@@ -171,38 +309,42 @@ jobs:
 
             if [[ "$code" != "200" ]]; then
               rm -f "$file"
-              echo "NOT_READY|AVOXI API error (${code})"
+              echo "NOT_READY|AVOXI presence API error (${code})"
               return 0
             fi
 
             local presence
-            presence="$(jq -r '.presence // empty' "$file")"
+            presence="$(jq -r '.presence // .status // .state // .availability // empty' "$file" 2>/dev/null || echo "")"
             rm -f "$file"
 
             if [[ -z "$presence" ]]; then
-              echo "NOT_READY|Unknown presence"
+              echo "NOT_READY|AVOXI presence missing (resolved:${reason})"
               return 0
             fi
 
             local p
             p="$(tr '[:upper:]' '[:lower:]' <<<"$presence")"
 
-            if [[ "$p" == "available" || "$p" == "ready" ]]; then
-              echo "READY|${presence}"
+            if [[ "$p" == *"available"* || "$p" == *"ready"* ]]; then
+              echo "READY|${presence} (resolved:${reason})"
             else
-              echo "NOT_READY|${presence}"
+              echo "NOT_READY|${presence} (resolved:${reason})"
             fi
           }
 
+          # ----------------------------
+          # Main loop: one Telegram message per agent, only if needed
+          # ----------------------------
           total_agents="$(jq 'length' <<<"$AGENTS_JSON")"
+
           for i in $(seq 0 $((total_agents - 1))); do
             name="$(jq -r ".[$i].name" <<<"$AGENTS_JSON")"
             zendesk_email="$(jq -r ".[$i].zendesk_email" <<<"$AGENTS_JSON")"
-            avoxi_id="$(jq -r ".[$i].avoxi_id" <<<"$AGENTS_JSON")"
+            avoxi_ext="$(jq -r ".[$i].avoxi_ext" <<<"$AGENTS_JSON")"
             tg="$(jq -r ".[$i].telegram" <<<"$AGENTS_JSON")"
 
             z_out="$(check_zendesk_ready "$zendesk_email")"
-            a_out="$(check_avoxi_ready "$avoxi_id")"
+            a_out="$(check_avoxi_ready "$avoxi_ext" "$zendesk_email" "$name")"
 
             z_state="${z_out%%|*}"
             z_note="${z_out#*|}"
@@ -212,7 +354,7 @@ jobs:
             echo "Agent: ${name} | Zendesk: ${z_state} (${z_note}) | AVOXI: ${a_state} (${a_note})"
 
             if [[ "$z_state" != "READY" || "$a_state" != "READY" ]]; then
-              msg="⚠️ 16:05 UZT readiness check\n${tg}\nPlease set your status to Ready.\nZendesk: ${z_state}\nAVOXI: ${a_state}"
+              msg="⚠️ 16:05 readiness check\n${tg}\nPlease set your status to Ready.\nZendesk: ${z_state}\nAVOXI: ${a_state}"
               telegram_send "$msg"
             fi
           done
