@@ -44,6 +44,9 @@ jobs:
           echo "UTC time now: $(date -u)"
           echo "Runner local time: $(date)"
 
+          echo "If you see these two lines, YAML is fixed and the job is running."
+
+
           # ----------------------------
           # Agents for the 16:00 shift
           # NOTE: avoxi_ext is the EXTENSION you see in AVOXI UI (111/112)
