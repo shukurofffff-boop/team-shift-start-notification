@@ -35,10 +35,15 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq
 
-      - name: Check Zendesk + AVOXI and notify via Telegram if needed
-        shell: bash
-        run: |
-          set -euo pipefail
+- name: Check Zendesk + AVOXI and notify via Telegram if needed
+  shell: bash
+  run: |
+    set -euo pipefail
+
+    echo "UTC time now: $(date -u)"
+    echo "Runner local time: $(date)"
+
+    # rest of your existing script continues here
 
           # ----------------------------
           # Agents for the 16:00 shift
